@@ -38,7 +38,7 @@ Create and push the signed release tag only after artifact review:
 
 ```console
 git tag -s v0.4.0 -m "tnetstring3 0.4.0"
-git push origin main v0.4.0
+git push origin master v0.4.0
 ```
 
 Download the CI artifacts into one clean release directory. Upload only the reviewed source
