@@ -1,4 +1,7 @@
 include LICENSE.txt
-include ChangeLog.txt
+include CHANGELOG.md
+include README.md
+include RELEASING.md
+recursive-include tests *.py
 recursive-include tnetstring *.c
 recursive-include tnetstring *.h

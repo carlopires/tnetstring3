@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tnetstring3"
+dynamic = ["version"]
+description = "Fast typed-netstring encoding and decoding for Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [
+    { name = "Ryan Kelly" },
+    { name = "Carlo Pires", email = "carlopires@gmail.com" },
+]
+keywords = ["netstring", "serialization", "tnetstring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/carlopires/tnetstring3"
+Issues = "https://github.com/carlopires/tnetstring3/issues"
+Source = "https://github.com/carlopires/tnetstring3"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.dynamic]
+version = { attr = "tnetstring.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["tnetstring"]
+
+[tool.cibuildwheel]
+build = [
+    "cp310-*",
+    "cp311-*",
+    "cp312-*",
+    "cp313-*",
+    "cp314-*",
+    "cp314t-*",
+]
+skip = ["*-win32", "*-manylinux_i686", "*-musllinux_i686"]
+test-command = "python -m unittest discover -v -s {project}/tests"
