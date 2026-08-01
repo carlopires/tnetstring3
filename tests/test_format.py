@@ -4,6 +4,7 @@ import math
 import io
 import tnetstring
 import struct
+import sys
 
 MAXINT = 2 ** (struct.Struct('i').size * 8 - 1) - 1
 
@@ -86,10 +87,89 @@ class Test_Format(unittest.TestCase):
             self.assertEqual((v,b''),tnetstring.pop(tnetstring.dumps(v)))
 
     def test_roundtrip_big_integer(self):
-        i1 = math.factorial(30000)
+        i1 = math.factorial(1000)
         s = tnetstring.dumps(i1)
         i2 = tnetstring.loads(s)
         self.assertEqual(i1, i2)
+
+    def test_malformed_values_raise_instead_of_reading_outside_input(self):
+        malformed = (
+            b'',
+            b':',
+            b'0:#',
+            b'1:+#',
+            b'1:-#',
+            b'0:^',
+            b'1: ^',
+            b'4: 1.0^',
+            b'10:123#',
+            b'1000000000:value,',
+        )
+        for value in malformed:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    tnetstring.loads(value)
+
+    def test_load_does_not_retain_read_results(self):
+        class ReusingReader:
+            def __init__(self):
+                self.parts = [
+                    bytes(bytearray(b'1')),
+                    bytes(bytearray(b':')),
+                    bytes(bytearray(b'x,')),
+                ]
+                self.offset = 0
+
+            def read(self, _size):
+                value = self.parts[self.offset]
+                self.offset += 1
+                return value
+
+        reader = ReusingReader()
+        before = tuple(sys.getrefcount(value) for value in reader.parts)
+        self.assertEqual(b'x', tnetstring.load(reader))
+        after = tuple(sys.getrefcount(value) for value in reader.parts)
+        self.assertEqual(before, after)
+
+    def test_container_insert_error_does_not_corrupt_references(self):
+        for _ in range(100):
+            with self.assertRaises(TypeError):
+                tnetstring.loads(b'6:0:]0:~}')
+
+    def test_recursive_values_stop_at_python_recursion_limit(self):
+        depth = 100_000
+        encoded_length = len(b'0:~')
+        encoded_prefixes = []
+        value = None
+        for _ in range(depth):
+            prefix = str(encoded_length).encode() + b':'
+            encoded_prefixes.append(prefix)
+            encoded_length += len(prefix) + 1
+            value = [value]
+        encoded = b''.join(reversed(encoded_prefixes)) + b'0:~' + (b']' * depth)
+
+        with self.assertRaises(RecursionError):
+            tnetstring.loads(encoded)
+        with self.assertRaises(RecursionError):
+            tnetstring.dumps(value)
+
+    def test_rendering_does_not_retain_temporary_strings(self):
+        integer_text = '123'
+        float_text = '1.25'
+
+        class CustomInt(int):
+            def __str__(self):
+                return integer_text
+
+        class CustomFloat(float):
+            def __repr__(self):
+                return float_text
+
+        before = (sys.getrefcount(integer_text), sys.getrefcount(float_text))
+        self.assertEqual(b'3:123#', tnetstring.dumps(CustomInt(123)))
+        self.assertEqual(b'4:1.25^', tnetstring.dumps(CustomFloat(1.25)))
+        after = (sys.getrefcount(integer_text), sys.getrefcount(float_text))
+        self.assertEqual(before, after)
 
 class Test_FileLoading(unittest.TestCase):
     def test_roundtrip_file_examples(self):

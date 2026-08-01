@@ -13,6 +13,8 @@
 
 
 #define TNS_MAX_LENGTH 999999999
+#define TNS_ENTER_RECURSIVE(where) Py_EnterRecursiveCall(where)
+#define TNS_LEAVE_RECURSIVE() Py_LeaveRecursiveCall()
 #include "tns_core.c"
 
 //  We have one static tns_ops struct for parsing bytestrings.
@@ -36,13 +38,10 @@ _tnetstring_loads(PyObject* self, PyObject *args)
       PyErr_SetString(PyExc_TypeError, "arg must be of bytes type");
       return NULL;
   }
-  Py_INCREF(string);
-
   data = PyBytes_AS_STRING(string);
-  len = PyBytes_GET_SIZE(string);
+  len = (size_t)PyBytes_GET_SIZE(string);
   val = tns_parse(ops, data, len, NULL);
 
-  Py_DECREF(string);
   return val;
 }
 
@@ -83,7 +82,6 @@ _tnetstring_load(PyObject* self, PyObject *args)
   if(res == NULL) {
       goto error;
   }
-  Py_INCREF(res);
   if(!PyBytes_Check(res) || !PyBytes_GET_SIZE(res)) {
       PyErr_SetString(PyExc_ValueError,
                       "Not a tnetstring: invalid or missing length prefix");
@@ -102,7 +100,6 @@ _tnetstring_load(PyObject* self, PyObject *args)
       if(res == NULL) {
           goto error;
       }
-      Py_INCREF(res);
       if(!PyBytes_Check(res) || !PyBytes_GET_SIZE(res)) {
           PyErr_SetString(PyExc_ValueError,
                       "Not a tnetstring: invalid or missing length prefix");
@@ -112,14 +109,13 @@ _tnetstring_load(PyObject* self, PyObject *args)
       Py_DECREF(res); res = NULL;
   } else {
       do {
+          check(datalen <= (TNS_MAX_LENGTH - (size_t)(c - '0')) / 10,
+                "Not a tnetstring: absurdly large length prefix");
           datalen = (10 * datalen) + (c - '0');
-          check(datalen <= TNS_MAX_LENGTH,
-                "Not a tnetstring: absurdly large length prefix"); 
           res = PyObject_CallMethodObjArgs(file, methnm, metharg, NULL);
           if(res == NULL) {
               goto error;
           }
-          Py_INCREF(res);
           if(!PyBytes_Check(res) || !PyBytes_GET_SIZE(res)) {
               PyErr_SetString(PyExc_ValueError,
                         "Not a tnetstring: invalid or missing length prefix");
@@ -146,11 +142,10 @@ _tnetstring_load(PyObject* self, PyObject *args)
   if(res == NULL) {
       goto error;
   }
-  Py_INCREF(res);
   Py_DECREF(file); file = NULL;
   Py_DECREF(methnm); methnm = NULL;
   Py_DECREF(metharg); metharg = NULL;
-  if(!PyBytes_Check(res) || PyBytes_GET_SIZE(res) != datalen + 1) {
+  if(!PyBytes_Check(res) || (size_t)PyBytes_GET_SIZE(res) != datalen + 1) {
       PyErr_SetString(PyExc_ValueError,
                       "Not a tnetstring: invalid length prefix");
       goto error;
@@ -201,12 +196,9 @@ _tnetstring_pop(PyObject* self, PyObject *args)
       PyErr_SetString(PyExc_TypeError, "arg must be of bytes type");
       return NULL;
   }
-  Py_INCREF(string);
-
   data = PyBytes_AS_STRING(string);
-  len = PyBytes_GET_SIZE(string);
+  len = (size_t)PyBytes_GET_SIZE(string);
   val = tns_parse(ops, data, len, &remain);
-  Py_DECREF(string);
   if(val == NULL) {
       return NULL;
   }
@@ -229,13 +221,11 @@ _tnetstring_dumps(PyObject* self, PyObject *args)
   PyObject *object = NULL;
   PyObject *string = NULL;
   tns_ops *ops = &_tnetstring_ops_bytes;
-  tns_outbuf outbuf;
+  tns_outbuf outbuf = {0};
 
   if(!PyArg_UnpackTuple(args, "dumps", 1, 1, &object)) {
       return NULL;
   }
-  Py_INCREF(object);
-
   if(tns_outbuf_init(&outbuf) == -1) {
       goto error;
   }
@@ -243,7 +233,6 @@ _tnetstring_dumps(PyObject* self, PyObject *args)
       goto error;
   }
 
-  Py_DECREF(object);
   string = PyBytes_FromStringAndSize(NULL,tns_outbuf_size(&outbuf));
   if(string == NULL) {
       goto error;
@@ -255,7 +244,7 @@ _tnetstring_dumps(PyObject* self, PyObject *args)
   return string;
 
 error:
-  Py_DECREF(object);
+  tns_outbuf_free(&outbuf);
   return NULL;
 }
 
@@ -278,6 +267,12 @@ tns_parse_integer(const tns_ops *ops, const char *data, size_t len)
   char *dataend;
   const char *pos, *eod;
   PyObject *v = NULL;
+  char *copy = NULL;
+
+  if(len == 0) {
+      PyErr_SetString(PyExc_ValueError, "invalid empty integer literal");
+      return NULL;
+  }
 
   //  Anything with less than 10 digits, we can fit into a long.
   //  Hand-parsing, as we need tighter error-checking than strtol.
@@ -299,9 +294,11 @@ tns_parse_integer(const tns_ops *ops, const char *data, size_t len)
           l = c - '0';
           break;
         case '+':
+          check(pos < eod, "invalid integer literal: sign without digits");
           break;
         case '-':
           sign = -1;
+          check(pos < eod, "invalid integer literal: sign without digits");
           break;
         default:
           sentinel("invalid integer literal: %c", c);
@@ -333,9 +330,11 @@ tns_parse_integer(const tns_ops *ops, const char *data, size_t len)
           ll = c - '0';
           break;
         case '+':
+          check(pos < eod, "invalid integer literal: sign without digits");
           break;
         case '-':
           sign = -1;
+          check(pos < eod, "invalid integer literal: sign without digits");
           break;
         default:
           sentinel("invalid integer literal: %c", c);
@@ -372,20 +371,24 @@ tns_parse_integer(const tns_ops *ops, const char *data, size_t len)
         default:
           sentinel("invalid big integer literal: %c", c);
       }
-      // PyLong_FromString insists that the string end in a NULL byte.
-      // I am *not* copying all that data.  Instead we lie a little bit
-      // about the const-ness of data, write a NULL over the format terminator
-      // and restore the original character when we're done.
-      c = data[len];
-      ((char*)data)[len] = '\0';
-      v = PyLong_FromString((char *)data, &dataend, 10);
-      ((char*)data)[len] = c;
-      check(dataend == data + len, "invalid big integer literal");
+      check(len < SIZE_MAX, "integer literal is too large");
+      copy = PyMem_Malloc(len + 1);
+      check_mem(copy);
+      memcpy(copy, data, len);
+      copy[len] = '\0';
+      v = PyLong_FromString(copy, &dataend, 10);
+      if(v == NULL) {
+          goto error;
+      }
+      check(dataend == copy + len, "invalid big integer literal");
+      PyMem_Free(copy);
       return v;
   }
   sentinel("invalid code branch, check your compiler...");
 
 error:
+  PyMem_Free(copy);
+  Py_XDECREF(v);
   return NULL;
 }
 
@@ -395,15 +398,25 @@ tns_parse_float(const tns_ops *ops, const char *data, size_t len)
 {
   double d = 0;
   char *dataend;
+  char *copy = NULL;
+  PyObject *value = NULL;
 
-  //  Technically this allows whitespace around the float, which
-  //  isn't valid in a tnetstring.  But I don't want to waste the
-  //  time checking and I am *not* reimplementing strtod.
-  d = strtod(data, &dataend);
-  if(dataend != data + len) {
-      return NULL;
-  }
-  return PyFloat_FromDouble(d);
+  check(len > 0, "invalid empty float literal");
+  check(!isspace((unsigned char)data[0]), "invalid float literal");
+  check(len < SIZE_MAX, "float literal is too large");
+  copy = PyMem_Malloc(len + 1);
+  check_mem(copy);
+  memcpy(copy, data, len);
+  copy[len] = '\0';
+  d = strtod(copy, &dataend);
+  check(dataend == copy + len, "invalid float literal");
+  value = PyFloat_FromDouble(d);
+  PyMem_Free(copy);
+  return value;
+
+error:
+  PyMem_Free(copy);
+  return NULL;
 }
 
 
@@ -457,11 +470,11 @@ tns_add_to_dict(const tns_ops *ops, void *dict, void *key, void *item)
 {
   int res;
   res = PyDict_SetItem(dict, key, item);
-  Py_DECREF(key);
-  Py_DECREF(item);
   if(res == -1) {
       return -1;
   }
+  Py_DECREF(key);
+  Py_DECREF(item);
   return 0;
 }
 
@@ -471,10 +484,10 @@ tns_add_to_list(const tns_ops *ops, void *list, void *item)
 {
   int res;
   res = PyList_Append(list, item);
-  Py_DECREF(item);
   if(res == -1) {
       return -1;
   }
+  Py_DECREF(item);
   return 0;
 }
 
@@ -490,10 +503,16 @@ tns_render_string(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 static int
 tns_render_integer(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 {
+  PyObject *unicode = NULL;
   PyObject *string = NULL;
   int res = 0;
 
-  string = PyUnicode_AsUTF8String(PyObject_Str(val));
+  unicode = PyObject_Str(val);
+  if(unicode == NULL) {
+      return -1;
+  }
+  string = PyUnicode_AsUTF8String(unicode);
+  Py_DECREF(unicode);
   if(string == NULL) {
       return -1;
   }
@@ -507,10 +526,16 @@ tns_render_integer(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 static int
 tns_render_float(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 {
+  PyObject *unicode = NULL;
   PyObject *string;
   int res = 0;
 
-  string = PyUnicode_AsUTF8String(PyObject_Repr(val));
+  unicode = PyObject_Repr(val);
+  if(unicode == NULL) {
+      return -1;
+  }
+  string = PyUnicode_AsUTF8String(unicode);
+  Py_DECREF(unicode);
   if(string == NULL) {
       return -1;
   }
@@ -669,4 +694,3 @@ PyInit__tnetstring(void) {
 
   return PyModule_Create(&_tnetstring_module);
 };
-

@@ -9,6 +9,9 @@
 #include "dbg.h"
 #include "tns_core.h"
 
+#include <stdint.h>
+#include <string.h>
+
 #ifndef TNS_MAX_LENGTH
 #define TNS_MAX_LENGTH 999999999
 #endif
@@ -43,22 +46,33 @@ static void tns_outbuf_free(tns_outbuf *outbuf);
 
 //  Helper function to read a base-ten integer off a string.
 //  Due to additional constraints, we can do it faster than strtoi.
-static size_t tns_strtosz(const char *data, size_t len, size_t *sz, char **end);
+static int tns_strtosz(const char *data, size_t len, size_t *sz, char **end);
+
+#ifndef TNS_ENTER_RECURSIVE
+#define TNS_ENTER_RECURSIVE(where) 0
+#define TNS_LEAVE_RECURSIVE() ((void)0)
+#endif
 
 
 void* tns_parse(const tns_ops *ops, const char *data, size_t len, char **remain)
 {
+  const char *end = NULL;
   char *valstr = NULL;
   tns_type_tag type = tns_tag_null;
   size_t vallen = 0;
 
+  check(ops != NULL, "Not a tnetstring: parser operations are missing.");
+  check(data != NULL && len >= 3,
+        "Not a tnetstring: invalid or missing length prefix.");
+  end = data + len;
+
   //  Read the length of the value, and verify that it ends in a colon.
-  check(tns_strtosz(data, len, &vallen, &valstr) != -1,
+  check(tns_strtosz(data, len, &vallen, &valstr) == 0,
         "Not a tnetstring: invalid length prefix.");
-  check(*valstr == ':',
+  check(valstr < end && *valstr == ':',
         "Not a tnetstring: invalid length prefix.");
   valstr++;
-  check((valstr+vallen) < (data+len),
+  check(vallen < (size_t)(end - valstr),
         "Not a tnetstring: invalid length prefix.");
 
   //  Grab the type tag from the end of the value.
@@ -86,8 +100,10 @@ error:
 void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, size_t len)
 {
   void *val = NULL;
+  int entered_recursive = 0;
 
-  assert(ops != NULL && "ops struct cannot be NULL");
+  check(ops != NULL, "Not a tnetstring: parser operations are missing.");
+  check(data != NULL, "Not a tnetstring: payload is missing.");
 
   switch(type) {
     //  Primitive type: a string blob.
@@ -126,6 +142,9 @@ void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, 
     //  Compound type: a dict.
     //  The data is written <key><value><key><value>
     case tns_tag_dict:
+        check(TNS_ENTER_RECURSIVE(" while decoding a tnetstring") == 0,
+              "Not a tnetstring: nesting is too deep.");
+        entered_recursive = 1;
         val = ops->new_dict(ops);
         check(val != NULL, "Could not create dict.");
         check(tns_parse_dict(ops, val, data, len) != -1,
@@ -134,6 +153,9 @@ void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, 
     //  Compound type: a list.
     //  The data is written <item><item><item>
     case tns_tag_list:
+        check(TNS_ENTER_RECURSIVE(" while decoding a tnetstring") == 0,
+              "Not a tnetstring: nesting is too deep.");
+        entered_recursive = 1;
         val = ops->new_list(ops);
         check(val != NULL, "Could not create list.");
         check(tns_parse_list(ops, val, data, len) != -1,
@@ -144,9 +166,15 @@ void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, 
         sentinel("Not a tnetstring: invalid type tag.");
   }
 
+  if(entered_recursive) {
+      TNS_LEAVE_RECURSIVE();
+  }
   return val;
 
 error:
+  if(entered_recursive) {
+      TNS_LEAVE_RECURSIVE();
+  }
   if(val != NULL) {
       ops->free_value(ops, val);
   }
@@ -159,7 +187,7 @@ error:
 
 char* tns_render(const tns_ops *ops, void *val, size_t *len)
 {
-  tns_outbuf outbuf;
+  tns_outbuf outbuf = {0};
 
   check(tns_outbuf_init(&outbuf) != -1, "Failed to initialize outbuf.");
   check(tns_render_value(ops, val, &outbuf) != -1, "Failed to render value.");
@@ -176,15 +204,17 @@ int tns_render_value(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 {
   tns_type_tag type = tns_tag_null;
   int res = -1;
+  int entered_recursive = 0;
   size_t orig_size = 0;
 
-  assert(ops != NULL && "ops struct cannot be NULL");
+  check(ops != NULL, "render operations are missing.");
+  check(outbuf != NULL && outbuf->buffer != NULL, "render buffer is not initialized.");
 
   //  Find out the type tag for the given value.
   type = ops->get_type(ops, val);
   check(type != 0, "type not serializable.");
 
-  tns_outbuf_putc(outbuf, type);
+  check(tns_outbuf_putc(outbuf, type) == 0, "Failed to write type tag.");
   orig_size = tns_outbuf_size(outbuf);
 
   //  Render it into the output buffer using callbacks.
@@ -205,19 +235,32 @@ int tns_render_value(const tns_ops *ops, void *val, tns_outbuf *outbuf)
       res = 0;
       break;
     case tns_tag_dict:
+      check(TNS_ENTER_RECURSIVE(" while encoding a tnetstring") == 0,
+            "tnetstring nesting is too deep.");
+      entered_recursive = 1;
       res = ops->render_dict(ops, val, outbuf);
       break;
     case tns_tag_list:
+      check(TNS_ENTER_RECURSIVE(" while encoding a tnetstring") == 0,
+            "tnetstring nesting is too deep.");
+      entered_recursive = 1;
       res = ops->render_list(ops, val, outbuf);
       break;
     default:
       sentinel("unknown type tag: '%c'.", type);
   }
 
+  if(entered_recursive) {
+      TNS_LEAVE_RECURSIVE();
+      entered_recursive = 0;
+  }
   check(res == 0, "Failed to render value of type '%c'.", type);
   return tns_outbuf_clamp(outbuf, orig_size);
 
 error:
+  if(entered_recursive) {
+      TNS_LEAVE_RECURSIVE();
+  }
   return -1;
 }
 
@@ -291,12 +334,16 @@ error:
 
 
 
-static inline size_t
+static int
 tns_strtosz(const char *data, size_t len, size_t *sz, char **end)
 {
   char c;
   const char *pos, *eod;
   size_t value = 0;
+
+  if(data == NULL || sz == NULL || end == NULL || len == 0) {
+      return -1;
+  }
 
   pos = data;
   eod = data + len;
@@ -333,15 +380,14 @@ tns_strtosz(const char *data, size_t len, size_t *sz, char **end)
           *end = (char*) pos;
           return 0; 
       }
-      value = (value * 10) + (c - '0');
-      check(value <= TNS_MAX_LENGTH,
-            "Not a tnetstring: absurdly large length prefix");
+      if(value > (TNS_MAX_LENGTH - (size_t)(c - '0')) / 10) {
+          return -1;
+      }
+      value = (value * 10) + (size_t)(c - '0');
       pos++;
   }
 
   // If we consume the entire string, that's an error.
-
-error:
   return -1;
 }
 
@@ -368,6 +414,9 @@ error:
 
 int tns_outbuf_init(tns_outbuf *outbuf)
 {
+  outbuf->buffer = NULL;
+  outbuf->head = NULL;
+  outbuf->alloc_size = 0;
   outbuf->buffer = malloc(64);
   check_mem(outbuf->buffer);
 
@@ -397,12 +446,18 @@ static inline int tns_outbuf_extend(tns_outbuf *outbuf, size_t free_size)
 {
   char *new_buf = NULL;
   char *new_head = NULL;
-  size_t new_size = outbuf->alloc_size * 2;
+  size_t new_size;
+  size_t required_size;
   size_t used_size;
 
   used_size = tns_outbuf_size(outbuf);
+  check(free_size <= SIZE_MAX - used_size, "tnetstring output is too large");
+  required_size = free_size + used_size;
+  check(outbuf->alloc_size <= SIZE_MAX / 2, "tnetstring output is too large");
+  new_size = outbuf->alloc_size * 2;
 
-  while(new_size < free_size + used_size) {
+  while(new_size < required_size) {
+      check(new_size <= SIZE_MAX / 2, "tnetstring output is too large");
       new_size = new_size * 2;
   }
 
@@ -441,7 +496,7 @@ error:
 
 int tns_outbuf_puts(tns_outbuf *outbuf, const char *data, size_t len)
 {
-  if(outbuf->head - outbuf->buffer < len) {
+  if((size_t)(outbuf->head - outbuf->buffer) < len) {
       check(tns_outbuf_extend(outbuf, len) != -1, "Failed to extend buffer");
   }
 
@@ -468,6 +523,8 @@ static char* tns_outbuf_finalize(tns_outbuf *outbuf, size_t *len)
       *len = used_size;
   } else {
       if(outbuf->head == outbuf->buffer) {
+          check(outbuf->alloc_size <= SIZE_MAX / 2,
+                "tnetstring output is too large");
           new_buf = realloc(outbuf->buffer, outbuf->alloc_size*2);
           check_mem(new_buf);
           outbuf->buffer = new_buf;
@@ -490,6 +547,7 @@ static inline int tns_outbuf_clamp(tns_outbuf *outbuf, size_t orig_size)
 {
     size_t datalen = tns_outbuf_size(outbuf) - orig_size;
 
+    check(datalen <= TNS_MAX_LENGTH, "tnetstring value is too large");
     check(tns_outbuf_putc(outbuf, ':') != -1, "Failed to clamp outbuf");
     check(tns_outbuf_itoa(outbuf, datalen) != -1, "Failed to clamp outbuf");
 
@@ -504,4 +562,3 @@ void tns_outbuf_memmove(tns_outbuf *outbuf, char *dest)
 {
   memmove(dest, outbuf->head, tns_outbuf_size(outbuf));
 }
-
