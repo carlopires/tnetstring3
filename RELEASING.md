@@ -9,11 +9,11 @@
 
 ## Local validation
 
-Build the source distribution and native wheel for the current interpreter:
+Build and validate the source distribution:
 
 ```console
-uv build --clear
-uvx twine check dist/*
+uv build --sdist --clear
+uvx twine check dist/*.tar.gz
 ```
 
 Install the source distribution in a clean environment and run its included tests:
@@ -26,10 +26,11 @@ cd /tmp
   -s /path/to/tnetstring3/tests
 ```
 
-Use `cibuildwheel` with the configuration in `pyproject.toml` to build portable wheels. In
-particular, retain and test the `cp314t` artifacts; regular CPython wheels cannot be installed by
-free-threaded interpreters. Pushing the release tag runs the artifact-only GitHub workflow for
-Linux, macOS, and Windows. It intentionally does not publish to PyPI.
+Use `cibuildwheel` with the configuration in `pyproject.toml` to build portable wheels into a
+separate `wheelhouse` directory. In particular, retain and test the `cp314t` artifacts; regular
+CPython wheels cannot be installed by free-threaded interpreters. Pushing the release tag runs the
+artifact-only GitHub workflow for Linux, macOS, and Windows. It intentionally does not publish to
+PyPI.
 
 ## Publish
 
@@ -40,11 +41,11 @@ git tag -s v0.4.0 -m "tnetstring3 0.4.0"
 git push origin main v0.4.0
 ```
 
-Upload the reviewed source distribution and portable wheels using a scoped PyPI token or Trusted
-Publishing:
+Download the CI artifacts into one clean release directory. Upload only the reviewed source
+distribution and portable `cibuildwheel` wheels using a scoped PyPI token or Trusted Publishing:
 
 ```console
-uv publish dist/*
+uv publish release/*
 ```
 
 PyPI releases are immutable. Do not reuse a version after any artifact has been uploaded.
