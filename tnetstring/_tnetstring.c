@@ -17,8 +17,46 @@
 #define TNS_LEAVE_RECURSIVE() Py_LeaveRecursiveCall()
 #include "tns_core.c"
 
-//  We have one static tns_ops struct for parsing bytestrings.
-static tns_ops _tnetstring_ops_bytes;
+static tns_type_tag tns_get_type(const tns_ops *ops, void *val);
+static void* tns_parse_string(const tns_ops *ops, const char *data, size_t len);
+static void* tns_parse_integer(const tns_ops *ops, const char *data, size_t len);
+static void* tns_parse_float(const tns_ops *ops, const char *data, size_t len);
+static void* tns_get_null(const tns_ops *ops);
+static void* tns_get_true(const tns_ops *ops);
+static void* tns_get_false(const tns_ops *ops);
+static int tns_render_string(const tns_ops *ops, void *val, tns_outbuf *outbuf);
+static int tns_render_integer(const tns_ops *ops, void *val, tns_outbuf *outbuf);
+static int tns_render_float(const tns_ops *ops, void *val, tns_outbuf *outbuf);
+static int tns_render_bool(const tns_ops *ops, void *val, tns_outbuf *outbuf);
+static void* tns_new_list(const tns_ops *ops);
+static int tns_add_to_list(const tns_ops *ops, void *list, void *item);
+static int tns_render_list(const tns_ops *ops, void *list, tns_outbuf *outbuf);
+static void* tns_new_dict(const tns_ops *ops);
+static int tns_add_to_dict(const tns_ops *ops, void *dict, void *key, void *item);
+static int tns_render_dict(const tns_ops *ops, void *dict, tns_outbuf *outbuf);
+static void tns_free_value(const tns_ops *ops, void *value);
+
+//  Immutable callback configuration is safe to share across interpreters and threads.
+static const tns_ops _tnetstring_ops_bytes = {
+    .get_type = tns_get_type,
+    .parse_string = tns_parse_string,
+    .parse_integer = tns_parse_integer,
+    .parse_float = tns_parse_float,
+    .get_null = tns_get_null,
+    .get_true = tns_get_true,
+    .get_false = tns_get_false,
+    .render_string = tns_render_string,
+    .render_integer = tns_render_integer,
+    .render_float = tns_render_float,
+    .render_bool = tns_render_bool,
+    .new_list = tns_new_list,
+    .add_to_list = tns_add_to_list,
+    .render_list = tns_render_list,
+    .new_dict = tns_new_dict,
+    .add_to_dict = tns_add_to_dict,
+    .render_dict = tns_render_dict,
+    .free_value = tns_free_value,
+};
 
 //  _tnetstring_loads:  parse tnetstring-format value from a string.
 //
@@ -27,7 +65,7 @@ _tnetstring_loads(PyObject* self, PyObject *args)
 {
   PyObject *string = NULL;
   PyObject *val = NULL;
-  tns_ops *ops = &_tnetstring_ops_bytes;
+  const tns_ops *ops = &_tnetstring_ops_bytes;
   char *data;
   size_t len;
 
@@ -60,7 +98,7 @@ _tnetstring_load(PyObject* self, PyObject *args)
   PyObject *methnm = NULL;
   PyObject *metharg = NULL;
   PyObject *res = NULL;
-  tns_ops *ops = &_tnetstring_ops_bytes;
+  const tns_ops *ops = &_tnetstring_ops_bytes;
   char c, *data;
   size_t datalen = 0;
 
@@ -185,7 +223,7 @@ _tnetstring_pop(PyObject* self, PyObject *args)
   PyObject *val = NULL;
   PyObject *rest = NULL;
   PyObject *result = NULL;
-  tns_ops *ops = &_tnetstring_ops_bytes;
+  const tns_ops *ops = &_tnetstring_ops_bytes;
   char *data, *remain;
   size_t len;
 
@@ -220,7 +258,7 @@ _tnetstring_dumps(PyObject* self, PyObject *args)
 {
   PyObject *object = NULL;
   PyObject *string = NULL;
-  tns_ops *ops = &_tnetstring_ops_bytes;
+  const tns_ops *ops = &_tnetstring_ops_bytes;
   tns_outbuf outbuf = {0};
 
   if(!PyArg_UnpackTuple(args, "dumps", 1, 1, &object)) {
@@ -560,38 +598,58 @@ tns_render_bool(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 static int
 tns_render_dict(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 {
+  PyObject *snapshot = NULL;
   PyObject *key, *item;
   Py_ssize_t pos = 0;
+  int result = -1;
 
-  while(PyDict_Next(val, &pos, &key, &item)) {
+  snapshot = PyDict_Copy(val);
+  if(snapshot == NULL) {
+      return -1;
+  }
+  while(PyDict_Next(snapshot, &pos, &key, &item)) {
       if(tns_render_value(ops, item, outbuf) == -1) {
-          return -1;
+          goto done;
       }
       if(tns_render_value(ops, key, outbuf) == -1) {
-          return -1;
+          goto done;
       }
   }
-  return 0;
+  result = 0;
+
+done:
+  Py_DECREF(snapshot);
+  return result;
 }
 
 
 static int
 tns_render_list(const tns_ops *ops, void *val, tns_outbuf *outbuf)
 {
+  PyObject *snapshot = NULL;
   PyObject *item;
   Py_ssize_t idx;
+  int result = -1;
 
+  snapshot = PyList_AsTuple(val);
+  if(snapshot == NULL) {
+      return -1;
+  }
   //  Remember, all output is in reverse.
   //  So we must write the last element first.
-  idx = PyList_GET_SIZE(val) - 1;
+  idx = PyTuple_GET_SIZE(snapshot) - 1;
   while(idx >= 0) {
-      item = PyList_GET_ITEM(val, idx);
+      item = PyTuple_GET_ITEM(snapshot, idx);
       if(tns_render_value(ops, item, outbuf) == -1) {
-          return -1;
+          goto done;
       }
       idx--;
   }
-  return 0;
+  result = 0;
+
+done:
+  Py_DECREF(snapshot);
+  return result;
 }
 
 
@@ -604,7 +662,7 @@ tns_type_tag tns_get_type(const tns_ops *ops, void *val)
   if(val == Py_None) {
     return tns_tag_null;
   }
-  if(PyLong_Check((PyObject*)val) || PyLong_Check((PyObject*)val)) {
+  if(PyLong_Check((PyObject*)val)) {
     return tns_tag_integer;
   }
   if(PyFloat_Check((PyObject*)val)) {
@@ -661,36 +719,23 @@ static struct PyModuleDef _tnetstring_module = {
    PyModuleDef_HEAD_INIT,
    "_tnetstring",   /* name of module */
    _tnetstring_doc, /* module documentation, may be NULL */
-   -1,              /* size of per-interpreter state of the module,
-                       or -1 if the module keeps state in global variables. */
+   0,               /* the module has no per-interpreter mutable state */
    _tnetstring_methods
 };
 
 PyMODINIT_FUNC
 PyInit__tnetstring(void) {
-  //  Initialize function pointers for parsing bytes.
-  _tnetstring_ops_bytes.get_type = &tns_get_type;
-  _tnetstring_ops_bytes.free_value = &tns_free_value;
+  PyObject *module = PyModule_Create(&_tnetstring_module);
+  if(module == NULL) {
+      return NULL;
+  }
 
-  _tnetstring_ops_bytes.parse_string = tns_parse_string;
-  _tnetstring_ops_bytes.parse_integer = tns_parse_integer;
-  _tnetstring_ops_bytes.parse_float = tns_parse_float;
-  _tnetstring_ops_bytes.get_null = tns_get_null;
-  _tnetstring_ops_bytes.get_true = tns_get_true;
-  _tnetstring_ops_bytes.get_false = tns_get_false;
+#ifdef Py_GIL_DISABLED
+  if(PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED) < 0) {
+      Py_DECREF(module);
+      return NULL;
+  }
+#endif
 
-  _tnetstring_ops_bytes.render_string = tns_render_string;
-  _tnetstring_ops_bytes.render_integer = tns_render_integer;
-  _tnetstring_ops_bytes.render_float = tns_render_float;
-  _tnetstring_ops_bytes.render_bool = tns_render_bool;
-
-  _tnetstring_ops_bytes.new_dict = tns_new_dict;
-  _tnetstring_ops_bytes.add_to_dict = tns_add_to_dict;
-  _tnetstring_ops_bytes.render_dict = tns_render_dict;
-
-  _tnetstring_ops_bytes.new_list = tns_new_list;
-  _tnetstring_ops_bytes.add_to_list = tns_add_to_list;
-  _tnetstring_ops_bytes.render_list = tns_render_list;
-
-  return PyModule_Create(&_tnetstring_module);
+  return module;
 };
