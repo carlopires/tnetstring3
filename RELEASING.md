@@ -28,24 +28,27 @@ cd /tmp
 
 Use `cibuildwheel` with the configuration in `pyproject.toml` to build portable wheels into a
 separate `wheelhouse` directory. In particular, retain and test the `cp314t` artifacts; regular
-CPython wheels cannot be installed by free-threaded interpreters. Pushing the release tag runs the
-artifact-only GitHub workflow for Linux, macOS, and Windows. It intentionally does not publish to
-PyPI.
+CPython wheels cannot be installed by free-threaded interpreters.
+
+Push the release commit to `master`, wait for CI, and manually run the `Release` workflow against
+`master`. Review its Linux, macOS, Windows, and source-distribution artifacts before tagging. A
+manual workflow run never publishes.
 
 ## Publish
 
-Create and push the signed release tag only after artifact review:
+PyPI Trusted Publishing must identify this repository, `.github/workflows/release-artifacts.yml`,
+and the `pypi` environment. The matching GitHub environment must require approval before a
+deployment can proceed.
+
+Create and push the signed release tag only after the manual artifact run succeeds:
 
 ```console
 git tag -s v0.4.0 -m "tnetstring3 0.4.0"
 git push origin master v0.4.0
 ```
 
-Download the CI artifacts into one clean release directory. Upload only the reviewed source
-distribution and portable `cibuildwheel` wheels using a scoped PyPI token or Trusted Publishing:
-
-```console
-uv publish release/*
-```
+The tag runs the same artifact build. Once every artifact job succeeds, review and approve the
+`pypi` deployment. The isolated publish job downloads those artifacts and uploads them with a
+short-lived OIDC credential; it has no checkout or build step and uses no persistent PyPI token.
 
 PyPI releases are immutable. Do not reuse a version after any artifact has been uploaded.
