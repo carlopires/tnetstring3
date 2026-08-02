@@ -136,22 +136,29 @@ class Test_Format(unittest.TestCase):
             with self.assertRaises(TypeError):
                 tnetstring.loads(b'6:0:]0:~}')
 
-    def test_recursive_values_stop_at_python_recursion_limit(self):
-        depth = 100_000
-        encoded_length = len(b'0:~')
-        encoded_prefixes = []
-        value = None
-        for _ in range(depth):
-            prefix = str(encoded_length).encode() + b':'
-            encoded_prefixes.append(prefix)
-            encoded_length += len(prefix) + 1
-            value = [value]
-        encoded = b''.join(reversed(encoded_prefixes)) + b'0:~' + (b']' * depth)
+    def test_recursive_values_have_bounded_nesting(self):
+        def nested_value(depth):
+            value = None
+            for _ in range(depth):
+                value = [value]
+            return value
+
+        def nested_encoding(depth):
+            encoded_length = len(b'0:~')
+            encoded_prefixes = []
+            for _ in range(depth):
+                prefix = str(encoded_length).encode() + b':'
+                encoded_prefixes.append(prefix)
+                encoded_length += len(prefix) + 1
+            return b''.join(reversed(encoded_prefixes)) + b'0:~' + (b']' * depth)
+
+        self.assertIsInstance(tnetstring.loads(nested_encoding(512)), list)
+        self.assertIsInstance(tnetstring.dumps(nested_value(512)), bytes)
 
         with self.assertRaises(RecursionError):
-            tnetstring.loads(encoded)
+            tnetstring.loads(nested_encoding(513))
         with self.assertRaises(RecursionError):
-            tnetstring.dumps(value)
+            tnetstring.dumps(nested_value(513))
 
     def test_rendering_does_not_retain_temporary_strings(self):
         integer_text = '123'

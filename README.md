@@ -43,6 +43,8 @@ The public API is:
 Supported values are `bytes`, `int`, `float`, `bool`, `None`, `list`, and dictionaries whose keys
 and values are supported values. Strings are binary blobs in the typed-netstring protocol, so
 Python `str` values are intentionally rejected; applications must choose an encoding explicitly.
+Container nesting is limited to 512 levels during encoding and decoding to bound native stack use
+consistently across supported platforms.
 
 ## Free-threaded CPython
 

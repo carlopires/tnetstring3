@@ -15,6 +15,8 @@
 #define TNS_MAX_LENGTH 999999999
 #define TNS_ENTER_RECURSIVE(where) Py_EnterRecursiveCall(where)
 #define TNS_LEAVE_RECURSIVE() Py_LeaveRecursiveCall()
+#define TNS_SET_RECURSION_ERROR(where) \
+  PyErr_SetString(PyExc_RecursionError, "maximum tnetstring nesting exceeded" where)
 #include "tns_core.c"
 
 static tns_type_tag tns_get_type(const tns_ops *ops, void *val);

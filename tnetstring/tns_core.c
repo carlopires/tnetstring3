@@ -16,6 +16,10 @@
 #define TNS_MAX_LENGTH 999999999
 #endif
 
+#ifndef TNS_MAX_NESTING
+#define TNS_MAX_NESTING 512
+#endif
+
 //  Current outbuf implementation writes data starting at the back of
 //  the allocated buffer.  When finished we simply memmove it to the front.
 //  Here *buffer points to the allocated buffer, while *head points to the
@@ -24,14 +28,21 @@ struct tns_outbuf_s {
   char *buffer;
   char *head;
   size_t alloc_size;
+  size_t nesting;
 };
 
+static void* tns_parse_at_depth(
+    const tns_ops *ops, const char *data, size_t len, char **remain, size_t depth);
+static void* tns_parse_payload_at_depth(
+    const tns_ops *ops, tns_type_tag type, const char *data, size_t len, size_t depth);
 
 //  Helper function for parsing a dict; basically parses items in a loop.
-static int tns_parse_dict(const tns_ops *ops, void *dict, const char *data, size_t len);
+static int tns_parse_dict(
+    const tns_ops *ops, void *dict, const char *data, size_t len, size_t depth);
 
 //  Helper function for parsing a list; basically parses items in a loop.
-static int tns_parse_list(const tns_ops *ops, void *list, const char *data, size_t len);
+static int tns_parse_list(
+    const tns_ops *ops, void *list, const char *data, size_t len, size_t depth);
 
 //  Helper function for writing the length prefix onto a rendered value.
 static int tns_outbuf_clamp(tns_outbuf *outbuf, size_t orig_size);
@@ -53,8 +64,19 @@ static int tns_strtosz(const char *data, size_t len, size_t *sz, char **end);
 #define TNS_LEAVE_RECURSIVE() ((void)0)
 #endif
 
+#ifndef TNS_SET_RECURSION_ERROR
+#define TNS_SET_RECURSION_ERROR(where) ((void)(where))
+#endif
+
 
 void* tns_parse(const tns_ops *ops, const char *data, size_t len, char **remain)
+{
+  return tns_parse_at_depth(ops, data, len, remain, 0);
+}
+
+
+static void* tns_parse_at_depth(
+    const tns_ops *ops, const char *data, size_t len, char **remain, size_t depth)
 {
   const char *end = NULL;
   char *valstr = NULL;
@@ -84,7 +106,7 @@ void* tns_parse(const tns_ops *ops, const char *data, size_t len, char **remain)
   }
 
   //  Now dispatch type parsing based on the type tag.
-  return tns_parse_payload(ops, type, valstr, vallen);
+  return tns_parse_payload_at_depth(ops, type, valstr, vallen, depth);
 
 error:
   return NULL;
@@ -98,6 +120,13 @@ error:
                                    && s[3]=='s' && s[4] == 'e')
 
 void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, size_t len)
+{
+  return tns_parse_payload_at_depth(ops, type, data, len, 0);
+}
+
+
+static void* tns_parse_payload_at_depth(
+    const tns_ops *ops, tns_type_tag type, const char *data, size_t len, size_t depth)
 {
   void *val = NULL;
   int entered_recursive = 0;
@@ -142,23 +171,31 @@ void* tns_parse_payload(const tns_ops *ops,tns_type_tag type, const char *data, 
     //  Compound type: a dict.
     //  The data is written <key><value><key><value>
     case tns_tag_dict:
+        if(depth >= TNS_MAX_NESTING) {
+            TNS_SET_RECURSION_ERROR(" while decoding a tnetstring");
+            goto error;
+        }
         check(TNS_ENTER_RECURSIVE(" while decoding a tnetstring") == 0,
               "Not a tnetstring: nesting is too deep.");
         entered_recursive = 1;
         val = ops->new_dict(ops);
         check(val != NULL, "Could not create dict.");
-        check(tns_parse_dict(ops, val, data, len) != -1,
+        check(tns_parse_dict(ops, val, data, len, depth + 1) != -1,
               "Not a tnetstring: broken dict items.");
         break;
     //  Compound type: a list.
     //  The data is written <item><item><item>
     case tns_tag_list:
+        if(depth >= TNS_MAX_NESTING) {
+            TNS_SET_RECURSION_ERROR(" while decoding a tnetstring");
+            goto error;
+        }
         check(TNS_ENTER_RECURSIVE(" while decoding a tnetstring") == 0,
               "Not a tnetstring: nesting is too deep.");
         entered_recursive = 1;
         val = ops->new_list(ops);
         check(val != NULL, "Could not create list.");
-        check(tns_parse_list(ops, val, data, len) != -1,
+        check(tns_parse_list(ops, val, data, len, depth + 1) != -1,
               "Not a tnetstring: broken list items.");
         break;
     //  Whoops, that ain't a tnetstring.
@@ -205,6 +242,7 @@ int tns_render_value(const tns_ops *ops, void *val, tns_outbuf *outbuf)
   tns_type_tag type = tns_tag_null;
   int res = -1;
   int entered_recursive = 0;
+  int entered_nesting = 0;
   size_t orig_size = 0;
 
   check(ops != NULL, "render operations are missing.");
@@ -235,15 +273,27 @@ int tns_render_value(const tns_ops *ops, void *val, tns_outbuf *outbuf)
       res = 0;
       break;
     case tns_tag_dict:
+      if(outbuf->nesting >= TNS_MAX_NESTING) {
+          TNS_SET_RECURSION_ERROR(" while encoding a tnetstring");
+          goto error;
+      }
       check(TNS_ENTER_RECURSIVE(" while encoding a tnetstring") == 0,
             "tnetstring nesting is too deep.");
       entered_recursive = 1;
+      outbuf->nesting++;
+      entered_nesting = 1;
       res = ops->render_dict(ops, val, outbuf);
       break;
     case tns_tag_list:
+      if(outbuf->nesting >= TNS_MAX_NESTING) {
+          TNS_SET_RECURSION_ERROR(" while encoding a tnetstring");
+          goto error;
+      }
       check(TNS_ENTER_RECURSIVE(" while encoding a tnetstring") == 0,
             "tnetstring nesting is too deep.");
       entered_recursive = 1;
+      outbuf->nesting++;
+      entered_nesting = 1;
       res = ops->render_list(ops, val, outbuf);
       break;
     default:
@@ -254,6 +304,10 @@ int tns_render_value(const tns_ops *ops, void *val, tns_outbuf *outbuf)
       TNS_LEAVE_RECURSIVE();
       entered_recursive = 0;
   }
+  if(entered_nesting) {
+      outbuf->nesting--;
+      entered_nesting = 0;
+  }
   check(res == 0, "Failed to render value of type '%c'.", type);
   return tns_outbuf_clamp(outbuf, orig_size);
 
@@ -261,11 +315,15 @@ error:
   if(entered_recursive) {
       TNS_LEAVE_RECURSIVE();
   }
+  if(entered_nesting) {
+      outbuf->nesting--;
+  }
   return -1;
 }
 
 
-static int tns_parse_list(const tns_ops *ops, void *val, const char *data, size_t len)
+static int tns_parse_list(
+    const tns_ops *ops, void *val, const char *data, size_t len, size_t depth)
 {
   void *item = NULL;
   char *remain = NULL;
@@ -274,7 +332,7 @@ static int tns_parse_list(const tns_ops *ops, void *val, const char *data, size_
   assert(data != NULL && "data cannot be NULL");
 
   while(len > 0) {
-      item = tns_parse(ops, data, len, &remain);
+      item = tns_parse_at_depth(ops, data, len, &remain, depth);
       check(item != NULL, "Failed to parse list.");
       len = len - (remain - data);
       data = remain;
@@ -293,7 +351,8 @@ error:
 }
 
 
-static int tns_parse_dict(const tns_ops *ops, void *val, const char *data, size_t len)
+static int tns_parse_dict(
+    const tns_ops *ops, void *val, const char *data, size_t len, size_t depth)
 {
   void *key = NULL;
   void *item = NULL;
@@ -303,12 +362,12 @@ static int tns_parse_dict(const tns_ops *ops, void *val, const char *data, size_
   assert(data != NULL && "data cannot be NULL");
 
   while(len > 0) {
-      key = tns_parse(ops, data, len, &remain);
+      key = tns_parse_at_depth(ops, data, len, &remain, depth);
       check(key != NULL, "Failed to parse dict key from tnetstring.");
       len = len - (remain - data);
       data = remain;
 
-      item = tns_parse(ops, data, len, &remain);
+      item = tns_parse_at_depth(ops, data, len, &remain, depth);
       check(item != NULL, "Failed to parse dict item from tnetstring.");
       len = len - (remain - data);
       data = remain;
@@ -417,6 +476,7 @@ int tns_outbuf_init(tns_outbuf *outbuf)
   outbuf->buffer = NULL;
   outbuf->head = NULL;
   outbuf->alloc_size = 0;
+  outbuf->nesting = 0;
   outbuf->buffer = malloc(64);
   check_mem(outbuf->buffer);
 
@@ -438,6 +498,7 @@ static inline void tns_outbuf_free(tns_outbuf *outbuf)
       outbuf->buffer = NULL;
       outbuf->head = 0;
       outbuf->alloc_size = 0;
+      outbuf->nesting = 0;
   }
 }
 
